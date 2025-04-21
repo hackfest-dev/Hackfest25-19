@@ -1,0 +1,588 @@
+---
+version: '3.6'
+
+
+
+
+x-quorum-def:
+  &quorum-def
+  restart: "on-failure"
+  build:
+    context: config/goquorum
+    args:
+      QUORUM_VERSION: ${QUORUM_VERSION:-latest}
+  expose:
+    - 30303
+    - 8545
+    - 9545
+  healthcheck:
+    test: ["CMD", "wget", "--spider", "--proxy", "off", "http://localhost:8545"]
+    interval: 3s
+    timeout: 3s
+    retries: 10
+    start_period: 5s
+
+
+
+x-tessera-def:
+  &tessera-def
+  build:
+    context: config/tessera
+    args:
+      TESSERA_VERSION: ${TESSERA_VERSION:-latest}
+  environment:
+    TESSERA_MODE: tessera
+  expose:
+    - 9000
+    - 9080
+    - 9101
+  restart: "no"
+  healthcheck:
+    test: ["CMD", "wget", "--spider", "--proxy", "off", "http://localhost:9000/upcheck"]
+    interval: 3s
+    timeout: 3s
+    retries: 20
+    start_period: 5s
+
+
+
+
+
+x-blockscout-ref:
+  &blockscout-def
+  image: consensys/blockscout:v4.1.5-beta
+  container_name: blockscout
+  restart: "no"
+  environment:
+    - PORT=4000
+    - ECTO_USE_SSL=false
+    - DATABASE_URL=postgresql://postgres:postgres@blockscoutpostgres:5432/postgres?ssl=false
+    - POSTGRES_PASSWORD=postgres
+    - POSTGRES_USER=postgres
+    - NETWORK=quickstart
+    - NETWORK=Dev Quickstart
+    - SUBNETWORK=Quorum
+    - CHAIN_ID=1337
+    - COIN=ETH
+    - ETHEREUM_JSONRPC_VARIANT=geth
+    - ETHEREUM_JSONRPC_TRANSPORT=http
+    - ETHEREUM_JSONRPC_HTTP_URL=http://rpcnode:8545
+    - ETHEREUM_JSONRPC_TRACE_URL=http://rpcnode:8545
+    - ETHEREUM_JSONRPC_WS_URL=ws://rpcnode:8546
+  entrypoint:
+    - /bin/sh
+    - -c
+    - |
+      cd /opt/app/;
+      echo $$MIX_ENV && mix do ecto.create, ecto.migrate; mix phx.server;
+  depends_on:
+    - blockscoutpostgres
+  links:
+    - blockscoutpostgres
+  ports:
+    - 26000:4000
+
+x-blockscoutpostgres-ref:
+  &blockscoutpostgres-def
+  image: postgres:13.6-alpine
+  restart: "on-failure"
+  container_name: blockscoutpostgres
+  environment:
+    - POSTGRES_USER=postgres
+    - POSTGRES_PASSWORD=postgres
+    - POSTGRES_HOST_AUTH_METHOD=trust
+  volumes:
+    - blockscoutpostgres:/var/lib/postgresql/data
+  ports:
+    - 5432
+  healthcheck:
+    test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+    interval: 5s
+    timeout: 10s
+    retries: 5
+
+
+
+
+
+x-chainlensapi-ref:
+  &chainlensapi-def
+  image: web3labs/epirus-free-api:latest
+  container_name: chainlensapi
+  environment:
+    - NODE_ENDPOINT=http://rpcnode:8545
+    - MONGO_CLIENT_URI=mongodb://chainlensmongodb:27017
+    - REINDEX_ENDPOINT=http://chainlensingestion/reindex/
+    - MONGO_DB_NAME=epirus
+    - MONGO_CREATE_INDICES=true
+  depends_on:
+    - chainlensmongodb
+
+x-chainlensmongodb-ref:
+  &chainlensmongodb-def
+  image: mongo:5.0.8
+  container_name: chainlensmongodb
+  environment:
+    - COMPOSE_HTTP_TIMEOUT=900
+    - DOCKER_CLIENT_TIMEOUT=900
+  entrypoint: mongod --bind_ip "0.0.0.0"
+
+x-chainlensweb-ref:
+  &chainlensweb-def
+  image: web3labs/epirus-free-web:latest
+  container_name: chainlensweb
+  environment:
+    - API_URL=/api
+    - DISPLAY_NETWORK_TAB=disabled
+  depends_on:
+    - chainlensapi
+
+x-chainlensingestion-ref:
+  &chainlensingestion-def
+  image: web3labs/epirus-free-ingestion:latest
+  container_name: chainlensingestion
+  environment:
+    - NODE_ENDPOINT=http://rpcnode:8545
+    - MONGO_CLIENT_URI=mongodb://chainlensmongodb:27017
+    - MONGO_DB_NAME=epirus
+  depends_on:
+    - chainlensmongodb
+    - chainlensweb
+
+x-chainlensnginx-ref:
+  &chainlensnginx-def
+  image: nginx:latest
+  container_name: chainlensnginx
+  volumes:
+    - ./chainlens/nginx.conf:/etc/nginx/nginx.conf
+    - ./chainlens/5xx.html:/www/error_pages/5xx.html
+  ports:
+    - 8081:80
+  depends_on:
+    - chainlensapi
+    - chainlensweb
+
+
+
+
+x-redis-def:
+  &redis-def
+  image: redis:alpine
+
+x-elasticsearch-def:
+  &elasticsearch-def
+  image: docker.elastic.co/elasticsearch/elasticsearch:7.14.1
+  environment:
+    - bootstrap.memory_lock=true
+    - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    - "http.host=0.0.0.0"
+    - "transport.host=127.0.0.1"
+    - "discovery.type=single-node"
+  ulimits:
+    memlock:
+      soft: -1
+      hard: -1
+    nofile:
+      soft: 65536
+      hard: 65536
+  cap_add:
+    - IPC_LOCK
+
+x-kibana-def:
+  &kibana-def
+  image: docker.elastic.co/kibana/kibana:7.14.1
+  environment:
+    ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
+    XPACK_MONITORING_ENABLED: "true"
+    XPACK_MONITORING_COLLECTION_ENABLED: "true"
+    SERVER_NAME: "localhost"
+  depends_on:
+    - elasticsearch
+  links:
+    - elasticsearch
+  ports:
+    - 5601:5601/tcp
+
+x-logstash-def:
+  &logstash-def
+  build: ./logstash
+  environment:
+    - ES_HOST=http://elasticsearch:9200
+    - REDIS_HOST=redis
+    - REDIS_PORT=6379
+  depends_on:
+    - redis
+    - elasticsearch
+  links:
+    - redis
+    - elasticsearch
+
+x-filebeat-def:
+  &filebeat-def
+  build: ./filebeat
+  environment:
+    - ENV_NAME=dev
+    - IP_ADDRESS=127.0.0.1
+    - REDIS_HOST=redis
+    - REDIS_PORT=6379
+  depends_on:
+    - redis
+  links:
+    - redis
+  volumes:
+    - ./logs/quorum/:/var/log/quorum/
+    - ./logs/tessera/:/var/log/tessera/
+
+
+
+
+services:
+
+  validator1:
+    << : *quorum-def
+    ports:
+      - 21001:8545/tcp
+      - 30303
+      - 9545
+    environment:
+      - GOQUORUM_CONS_ALGO=${GOQUORUM_CONS_ALGO}
+      - GOQUORUM_GENESIS_MODE=standard
+    volumes:
+      - ./config/nodes/validator1:/config/keys
+      - ./logs/quorum:/var/log/quorum/
+      - ./config/permissions:/permissions
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.11
+
+  validator2:
+    << : *quorum-def
+    ports:
+      - 21002:8545/tcp
+      - 30303
+      - 9545
+    environment:
+      - GOQUORUM_CONS_ALGO=${GOQUORUM_CONS_ALGO}
+      - GOQUORUM_GENESIS_MODE=standard
+    volumes:
+      - ./config/nodes/validator2:/config/keys
+      - ./logs/quorum:/var/log/quorum/
+      - ./config/permissions:/permissions
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.12
+
+  validator3:
+    << : *quorum-def
+    ports:
+      - 21003:8545/tcp
+      - 30303
+      - 9545
+    environment:
+      - GOQUORUM_CONS_ALGO=${GOQUORUM_CONS_ALGO}
+      - GOQUORUM_GENESIS_MODE=standard
+    volumes:
+      - ./config/nodes/validator3:/config/keys
+      - ./logs/quorum:/var/log/quorum/
+      - ./config/permissions:/permissions
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.13
+
+  validator4:
+    << : *quorum-def
+    ports:
+      - 21004:8545/tcp
+      - 30303
+      - 9545
+    environment:
+      - GOQUORUM_CONS_ALGO=${GOQUORUM_CONS_ALGO}
+      - GOQUORUM_GENESIS_MODE=standard
+    volumes:
+      - ./config/nodes/validator4:/config/keys
+      - ./logs/quorum:/var/log/quorum/
+      - ./config/permissions:/permissions
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.14
+
+  rpcnode:
+    << : *quorum-def
+    container_name: rpcnode
+    ports:
+      - 8545:8545/tcp
+      - 8546:8546/tcp
+      - 30303
+      - 9545
+    environment:
+      - GOQUORUM_CONS_ALGO=${GOQUORUM_CONS_ALGO}
+      - GOQUORUM_GENESIS_MODE=standard
+    volumes:
+      - ./config/nodes/rpcnode:/config/keys
+      - ./logs/quorum:/var/log/quorum/
+      - ./config/permissions:/permissions
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.15
+
+
+
+  member1tessera:
+    << : *tessera-def
+    ports:
+      - 9081:9080
+    volumes:
+      - ./config/nodes/member1:/config/keys
+      - ./logs/tessera:/var/log/tessera/
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.26
+
+  member1quorum:
+    << : *quorum-def
+    ports:
+      - 20000:8545/tcp
+      - 20001:8546/tcp
+      - 30303
+      - 9545
+    depends_on:
+      - member1tessera
+    environment:
+      - GOQUORUM_CONS_ALGO=${GOQUORUM_CONS_ALGO}
+      - GOQUORUM_GENESIS_MODE=enhanced
+      - QUORUM_PTM=member1tessera
+    volumes:
+      - ./config/nodes/member1:/config/keys
+      - ./logs/quorum:/var/log/quorum/
+      - ./config/permissions:/permissions
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.16
+
+  member2tessera:
+    << : *tessera-def
+    ports:
+      - 9082:9080
+    volumes:
+      - ./config/nodes/member2:/config/keys
+      - ./logs/tessera:/var/log/tessera/
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.27
+
+  member2quorum:
+    << : *quorum-def
+    ports:
+      - 20002:8545/tcp
+      - 20003:8546/tcp
+      - 30303
+      - 9545
+    depends_on:
+      - member2tessera
+    environment:
+      - GOQUORUM_CONS_ALGO=${GOQUORUM_CONS_ALGO}
+      - GOQUORUM_GENESIS_MODE=enhanced
+      - QUORUM_PTM=member2tessera
+    volumes:
+      - ./config/nodes/member2:/config/keys
+      - ./logs/quorum:/var/log/quorum/
+      - ./config/permissions:/permissions
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.17
+
+  member3tessera:
+    << : *tessera-def
+    ports:
+      - 9083:9080
+    volumes:
+      - ./config/nodes/member3:/config/keys
+      - ./logs/tessera:/var/log/tessera/
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.28
+
+  member3quorum:
+    << : *quorum-def
+    ports:
+      - 20004:8545/tcp
+      - 20005:8546/tcp
+      - 30303
+      - 9545
+    depends_on:
+      - member3tessera
+    environment:
+      - GOQUORUM_CONS_ALGO=${GOQUORUM_CONS_ALGO}
+      - GOQUORUM_GENESIS_MODE=enhanced
+      - QUORUM_PTM=member3tessera
+    volumes:
+      - ./config/nodes/member3:/config/keys
+      - ./logs/quorum:/var/log/quorum/
+      - ./config/permissions:/permissions
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.18
+
+
+
+  explorer:
+    image: consensys/quorum-explorer:${QUORUM_EXPLORER_VERSION:-latest}
+    volumes:
+      - ./quorum-explorer/config.json:/app/config.json
+      - ./quorum-explorer/env:/app/.env.production
+    depends_on:
+      - rpcnode
+    ports:
+      - 25000:25000/tcp
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.31
+
+
+
+  blockscout:
+    << : *blockscout-def
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.51
+
+  blockscoutpostgres:
+    << : *blockscoutpostgres-def
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.52
+
+
+
+
+  chainlensapi:
+    <<: *chainlensapi-def
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.53
+
+  chainlensmongodb:
+    <<: *chainlensmongodb-def
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.54
+
+  chainlensingestion:
+    <<: *chainlensingestion-def
+    depends_on:
+      - rpcnode
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.55
+
+  chainlensweb:
+    <<: *chainlensweb-def
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.56
+
+  chainlensnginx:
+    <<: *chainlensnginx-def
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.57
+
+
+
+
+  prometheus:
+    image: "prom/prometheus:v2.46.0"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml 
+    ports:
+      - 9090:9090/tcp
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.32
+
+  grafana:
+    image: "grafana/grafana:10.1.0"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_USERS_VIEWERS_CAN_EDIT=true
+    volumes:
+      - ./config/grafana/provisioning/:/etc/grafana/provisioning/
+      - grafana:/var/lib/grafana
+    ports:
+      - 3000:3000/tcp
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.33
+
+  loki:
+    image: "grafana/loki:2.8.4"
+    volumes:
+      - ./loki/loki.yml:/etc/loki/local-config.yaml:ro
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - 3100:3100/tcp
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.34
+
+  promtail:
+    image: "grafana/promtail:2.8.4"
+    volumes:
+      - ./logs:/var/log
+      - ./promtail/promtail.yml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.35
+
+
+  redis:
+    << : *redis-def
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.42
+
+  elasticsearch:
+    << : *elasticsearch-def
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.43
+
+  kibana:
+    << : *kibana-def
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.44
+
+  logstash:
+    << : *logstash-def
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.45
+
+  filebeat:
+    << : *filebeat-def
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.46
+
+
+
+networks:
+  quorum-dev-quickstart:
+    name: quorum-dev-quickstart
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+      - subnet: 172.16.239.0/24
+
+volumes:
+  splunk:
+  ethlogger:
+  prometheus:
+  grafana:
+  blockscoutpostgres:

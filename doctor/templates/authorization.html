@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Authorization Request</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+        .btn {
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 10px;
+        }
+        .btn-confirm {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .btn-deny {
+            background-color: #f44336;
+            color: white;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 4px;
+            display: none;
+        }
+        .success {
+            background-color: #dff0d8;
+            color: #3c763d;
+        }
+        .error {
+            background-color: #f2dede;
+            color: #a94442;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Authorization Request</h2>
+        <p>Dr. <strong>{{ doctor_name }}</strong> is requesting access to <strong>{{ username }}</strong>'s medical records.</p>
+        <p>Please confirm or deny this request:</p>
+        
+        <form id="auth-form">
+            <input type="hidden" id="request-id" value="{{ request_id }}">
+            <button type="button" class="btn btn-confirm" onclick="processAction('confirm')">Confirm</button>
+            <button type="button" class="btn btn-deny" onclick="processAction('deny')">Deny</button>
+        </form>
+        
+        <div id="result" class="result"></div>
+    </div>
+
+    <script>
+        function processAction(action) {
+            const resultDiv = document.getElementById('result');
+            const requestId = document.getElementById('request-id').value;
+            const buttons = document.querySelectorAll('.btn');
+            
+            // Disable buttons to prevent multiple submissions
+            buttons.forEach(btn => btn.disabled = true);
+            
+            // Create form data
+            const formData = new FormData();
+            formData.append('action', action);
+            
+            // Send POST request
+            fetch('/process_authorization/' + requestId, {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                resultDiv.style.display = 'block';
+                
+                if (data.error) {
+                    resultDiv.className = 'result error';
+                    resultDiv.textContent = data.error;
+                } else {
+                    resultDiv.className = 'result success';
+                    if (data.hasAccess) {
+                        resultDiv.textContent = `Access has been granted to ${data.doctor_name}.`;
+                    } else {
+                        resultDiv.textContent = `Access has been denied to ${data.doctor_name}.`;
+                    }
+                }
+            })
+            .catch(error => {
+                resultDiv.style.display = 'block';
+                resultDiv.className = 'result error';
+                resultDiv.textContent = 'An error occurred while processing your request.';
+                console.error('Error:', error);
+                
+                // Re-enable buttons on error
+                buttons.forEach(btn => btn.disabled = false);
+            });
+        }
+    </script>
+</body>
+</html>

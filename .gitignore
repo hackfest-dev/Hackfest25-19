@@ -1,0 +1,8 @@
+# Already in your .gitignore
+doctor/__pycache__
+doctor/.env
+doctor/remp.txt
+
+# Add these entries
+patient/temp.tst
+patient/tempCodeRunnerFile.py

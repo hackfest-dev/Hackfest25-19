@@ -1,0 +1,215 @@
+@app.route('/trigger', methods=['POST'])
+def get_response():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "No data provided"}), 400
+        username = data.get("username")
+        doctorname = data.get("doctorname")
+        emg_status = data.get("emg_status")
+        phone_number_1 = data.get("phone_number_1")
+        phone_number_2 = data.get("phone_number_2")
+        
+        result = main_send_message(
+            username=username,
+            doctor_name=doctorname,
+            emg_status=emg_status,
+            phone_number_1=phone_number_1,
+            phone_number_2=phone_number_2
+        )
+        patient_sms_url = "http://127.0.0.1:3535/send_auth_request"
+        
+        patient_data = {
+            "username":username,
+            "doctorname":doctorname,
+            "emg_status":emg_status,
+            "phone_number_1":phone_number_1,
+            "phone_number_2":phone_number_2
+        }
+        
+        rsponse = requests.post(patient_sms_url, json=patient_data)
+        if rsponse.status_code == 200:
+            print("SMS sent successfully")
+        else:
+            print("Failed to send SMS:", rsponse.text)
+        
+        
+        print("Final Response:", result)
+
+        
+        patient_toggle_url = "http://127.0.0.1:5000/toggle"
+        toggle_data = {
+            "username": username,
+            "doctor_name": doctorname,
+            "hasAccess": True  
+        }
+        try:
+            toggle_response = requests.post(patient_toggle_url, json=toggle_data)
+            toggle_response.raise_for_status() 
+            print("Toggle endpoint response:", toggle_response.json())
+        except requests.exceptions.RequestException as e:
+            print(f"Error triggering toggle endpoint: {e}")
+            
+    except Exception as e:
+        print(f"Error in trigger endpoint: {e}")
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
+            
+
+
+
+
+
+
+@app.route('/')
+def home():
+    return "SMS Authorization Service"
+
+@app.route('/send_auth_request', methods=['POST'])
+def send_auth_request():
+   
+    data = {
+        "username": request.json.get("username", "John Doe"),
+        "doctor_name": request.json.get("doctor_name", "Dr. Smith"),
+        "hasAccess": False,
+        "sent_time": datetime.utcnow().isoformat(),
+        "emg_status": request.json.get("emg_status", True),
+        "confirmed": False,  
+        "response_received": False 
+    }
+    
+    # Generate unique request ID
+    request_id = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    request_data[request_id] = data
+    auth_completed[request_id] = False
+    
+    # Create authorization URL
+    auth_url = url_for('authorization_page', request_id=request_id, _external=True)
+    
+    # Send SMS using Twilio
+    try:
+        phone_number_1 = request.json.get('phone_number_1')
+        phone_number_2 = request.json.get('phone_number_2')
+        
+        # Send SMS to the first number
+        client.messages.create(
+            body=f"Authorization request from {data['doctor_name']} for {data['username']}'s medical records. Please click: {auth_url}",
+            from_=TWILIO_PHONE_NUMBER,
+            to=phone_number_1
+        )
+        
+        # Send SMS to the second number only if emg_status is True
+        if data['emg_status'] and phone_number_2:
+            client.messages.create(
+                body=f"EMERGENCY: Authorization request from {data['doctor_name']} for {data['username']}'s medical records. Please click: {auth_url}",
+                from_=TWILIO_PHONE_NUMBER,
+                to=phone_number_2
+            )
+        
+        
+        timeout = request.json.get('timeout', 120)  
+        start_time = time.time()
+        while not auth_completed[request_id] and time.time() - start_time < timeout:
+            time.sleep(1) 
+        
+        
+        if not auth_completed[request_id]:
+            
+            del request_data[request_id]
+            del auth_completed[request_id]
+            return jsonify({
+                "status": "timeout",
+                "message": "Request timed out, no response received",
+                "username": data['username'],
+                "doctor_name": data['doctor_name'],
+                "hasAccess": False,
+                "emg_status": data['emg_status'],
+                "phone_number_1": phone_number_1,
+                "phone_number_2": phone_number_2 if data['emg_status'] and phone_number_2 else None
+            }), 408
+        
+       
+        final_data = request_data[request_id]
+        response = {
+            "status": "completed",
+            "username": final_data['username'],
+            "doctor_name": final_data['doctor_name'],
+            "hasAccess": final_data['hasAccess'],
+            "emg_status": final_data['emg_status'],
+            "phone_number_1": phone_number_1,
+            "phone_number_2": phone_number_2 if data['emg_status'] and phone_number_2 else None
+        }
+        
+        # Clean up
+        del request_data[request_id]
+        del auth_completed[request_id]
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        if request_id in request_data:
+            del request_data[request_id]
+        if request_id in auth_completed:
+            del auth_completed[request_id]
+        return jsonify({
+            "status": "error", 
+            "message": str(e),
+            "username": data['username'],
+            "doctor_name": data['doctor_name'],
+            "hasAccess": False,
+            "emg_status": data['emg_status'],
+            "phone_number_1": request.json.get('phone_number_1'),
+            "phone_number_2": request.json.get('phone_number_2')
+        }), 400
+        
+        
+@app.route('/authorization/<request_id>')
+def authorization_page(request_id):
+    
+    if request_id not in request_data:
+        return "Invalid request"
+    
+    data = request_data[request_id]
+    return render_template('authorization.html', 
+                         request_id=request_id,
+                         username=data['username'],
+                         doctor_name=data['doctor_name'])
+
+@app.route('/process_authorization/<request_id>', methods=['POST'])
+def process_authorization(request_id):
+    
+    if request_id not in request_data:
+        app.logger.error(f"Invalid request: {request_id} not found in request_data. Available IDs: {list(request_data.keys())}")
+        return jsonify({"error": "Invalid request", "details": "Request not found or expired"})
+    
+    data = request_data[request_id]
+    app.logger.info(f"Processing authorization for request_id: {request_id}")
+    
+    # Check if access has already been granted
+    if data['confirmed']:
+        return jsonify({"error": "Access has already been granted"})
+    
+    action = request.form.get('action')
+    app.logger.info(f"Action received: {action}")
+    
+    if action == 'confirm':
+        data['hasAccess'] = True
+        data['confirmed'] = True  # Mark as confirmed
+    
+    # Mark as response received
+    data['response_received'] = True
+    auth_completed[request_id] = True
+    
+    response = {
+        "username": data['username'],
+        "doctor_name": data['doctor_name'],
+        "hasAccess": data['hasAccess']
+    }
+    
+    return jsonify(response)
+
+
+
+    
+    
+if __name__ == '__main__':
+    app.run(debug=True, port=3535)
